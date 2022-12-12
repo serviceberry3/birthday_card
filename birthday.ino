@@ -1,9 +1,32 @@
-#include <Wire.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_GFX.h>
+#include <CapacitiveSensor.h>
+
+#define ENCODER_CLICK_VAL 1 //let each click of rotary encoder change 0-255 val by more than 1
+
+//how many items are in main menu
+#define MAIN_MENU_LEN 3
+#define MAX_SPD 10
+#define MIN_SPD 1
+
+//number of tones available
+#define NUM_TONES 8
+
+//keyboard stuff
+#define NUM_OF_SAMPLES 10   // Higher number whens more delay but more consistent readings
+#define CAP_THRESHOLD 150  // Capactive reading that triggers a note (adjust to fit your needs)
+#define NUM_KEYS 8 // Number of keys that are on the keyboard
+#define COMMON_PIN 5    // The common 'send' pin for all keys
+
+// This macro creates a capacitance "key" sensor object for each key on the piano keyboard:
+#define CS(Y) CapacitiveSensor(COMMON_PIN, Y)
+
+CapacitiveSensor keys[NUM_KEYS] = {CS(6), CS(8), CS(9), CS(10), CS(11), CS(12), CS(A0), CS(A1)};
+
+//instantiate an Adafruit display obj: 128x64 pixels, using I2C
+Adafruit_SSD1306 disp(128, 64, &Wire);
 
 //the current position of the rotary encoder
-int encoderPos = 0; 
+int encoderPos = 0;
 
 //the encoder's last position
 int lastReportedPos = 0; 
@@ -18,14 +41,14 @@ int menuCount = 0;
 boolean a_state = false;
 boolean b_state = false;
 
-
-int16_t x,y;
-uint16_t w,h;
+//bounds for text 
+int x, y, w, h;
 
 //buzzer pin
 int buzzerPin = 7;
 
-char curr_spd[4];
+//the current speed setting that the user selected
+//char curr_spd[4];
 
 //the last time the encoder button state changed
 long lastStateChangeTime = 0; 
@@ -34,56 +57,53 @@ long lastStateChangeTime = 0;
 long debounceDelay = 250; //in ms
 
 //items for main menu
-char menuItems[][2] = {
-  "Play song",
-  "Change speed"
+char* menuItems[MAIN_MENU_LEN] = {
+  "Song",
+  "Speed",
+  "Hearts"
 };
 
 //set up the encoder pins
 enum PinAssignments {
   encoderPinA = 2,  //encoder's A output pin mapped to Arduino pin 2
   encoderPinB = 3,  //encoder's B output pin mapped to Arduino pin 3
-  switchPin = 4 //encoder's switch pin mapped to Arduino pin 4, which will be used as input pin
+  switchPin = 4 //encoder's switch pin mapped to Arduino pin 4, which will be used as input pin,
 };
 
 //different states of the interface
 enum state {
   MAIN,
   SONG,
-  SPD
+  SPD,
+  KEYBOARD
 };
+
+//corresponding tones for the notes
+int tones[NUM_TONES] = {1275, 1136, 1014, 956, 834, 765, 655, 715};
+
+//name of all notes used here
+//char names[NUM_TONES] = {'G', 'A', 'B', 'c', 'd', 'e', 'x', 'y'};
+
+int piezo_tones[NUM_TONES] = {131, 147, 165, 175, 196, 220, 233, 262};
 
 //current state the interface is in
 state curr_state = MAIN;
 
-//instantiate an Adafruit display obj: 128x64 pixels, using I2C
-Adafruit_SSD1306 disp(128, 64, &Wire);
-
-//I2C address of OLED display
-#define OLED_ADDR 0x3C
-
-#define DESIRED_MAX_SPD_PX_PER_PULSE (float)14.0 //desired max ball speed in pixels per refresh
-#define ENCODER_CLICK_VAL 1 //let each click of rotary encoder change 0-255 val by more than 1
-
-//how many items are in main menu
-#define MAIN_MENU_LEN 2
-
-#define DUR_CUT 5
-
-//number of notes in Happy Birthday
-#define NUM_NOTES 28
-
 //time delay between notes, in ms
 int TEMPO = 200;
 
-//the max of encoder pos, starts at 1 for main menu
+//int top_marg = 0;
+
+//the max of encoder pos, starts at the appropriate max for main menu
 int max_encoder_pos = MAIN_MENU_LEN - 1;
 
 //min of encoder pos
 int min_encoder_pos = 0;
 
 //the string representing the song
-char notes[] = "GGAGcB GGAGdc GGxecBA yyecdc";
+//char notes[] = "GGAGcB GGAGdc GGxecBA yyecdc";
+
+int notes[] = {0, 0, 1, 0, 3, 2, -1, 0, 0, 1, 0, 4, 3, -1, 0, 0, 6, 5, 3, 2, 1, -1, 7, 7, 5, 3, 4, 3};
 char* sylls[28] = {"ha", "ppy", "birth", "day", "to", "you", "", "ha", "ppy", "birth", "day", "to", "you", "", "ha", "ppy", "birth", "day", "dear", "No", "a", "", "ha", "ppy", "birth", "day", "to", "you"};
 
 //array indicating for how long each note should (relatively) be held (including rests)
@@ -92,9 +112,9 @@ int note_hold_lengths[28] = {2, 2, 8, 8, 8, 16, 1, 2, 2, 8, 8, 8, 16, 1, 2, 2, 8
 //play the birthday song sequence
 int play_song() {
   //iterate through each note in song string
-  for (int i = 0; i < NUM_NOTES; i++) {
+  for (int i = 0; i < 28; i++) {
     //if it's a space, just delay   
-    if (notes[i] == ' ') {
+    if (notes[i] == -1) {
         delay(note_hold_lengths[i] * TEMPO); // delay between notes
     } 
   
@@ -114,12 +134,15 @@ void mainMenu() {
   disp.clearDisplay();
   
   disp.setTextSize(2);
-  disp.setCursor(15, 0);
-  disp.println("Play song");
 
-  disp.setCursor(15, 20);
-  disp.println("Set speed");
-  
+  int top_marg = 0;
+
+  for (int i = 0; i < MAIN_MENU_LEN; i++) {
+    disp.setCursor(15, top_marg);
+    disp.println(menuItems[i]);
+    top_marg += 20;
+  }
+
   disp.setCursor(2, menuCount * 20);
   disp.println(">");
 
@@ -130,7 +153,7 @@ void mainMenu() {
 
 void disp_setup() {
   //open up comms with the display
-  disp.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);  /* 0x3c is the I2C address */
+  disp.begin(SSD1306_SWITCHCAPVCC, 0x3c);  /* 0x3c is the I2C address */
 
   //clear display
   disp.clearDisplay();
@@ -139,15 +162,13 @@ void disp_setup() {
   disp.display();
 }
 
+//the main menu loop function
 void disp_loop() {
   //by default, always hold rotating at true so that the ISRs will debounce signal 
   rotating = true;
 
   //if the encoder position changed, print the new position
   if (lastReportedPos != encoderPos) {
-    //Serial.print("Encoder position: ");
-    //Serial.println(encoderPos);
-
     //save this position as the last encoder position
     lastReportedPos = encoderPos;
   }
@@ -163,6 +184,16 @@ void disp_loop() {
   }
 }
 
+//return to main menu
+void return_to_main(int pos) {
+  min_encoder_pos = 0;
+  max_encoder_pos = MAIN_MENU_LEN - 1;
+  encoderPos = pos;
+
+  //set state back to main to trigger the main menu loop
+  curr_state = MAIN; 
+}
+
 //switch handler fxn (when encoder button is clicked)
 void handleSwitch() {  
   //only accept input if it's been long enough since last button state change
@@ -174,37 +205,44 @@ void handleSwitch() {
   lastStateChangeTime = millis();
 
   //do actual handling
-
   switch(curr_state) {
+    //if we're in main menu
     case MAIN:
       //if we're on main menu, check what's selected
       switch(menuCount) {
         case 0:
           //switch state to SONG, play song, and switch state back to MAIN
-          curr_state = SONG;
           play_song();
-          curr_state = MAIN;
           break;
         case 1:
           //switch to speed selection screen
           encoderPos = int((TEMPO - 439) / -39);
-          min_encoder_pos = 1;
-          max_encoder_pos = 10;
+          min_encoder_pos = MIN_SPD;
+          max_encoder_pos = MAX_SPD;
           curr_state = SPD;
+          break;
+        //switch to keyboard activity
+        case 2:
+          curr_state = KEYBOARD;
           break;
       }
       break;
-      
+
+    //if we're in speed selection activity
     case SPD:
       //if we're in speed setting screen, return to main menu
 
       //change tempo -- use y = mx+b with points (1, 400) and (10, 50)
       TEMPO = -39 * encoderPos + 439;
       
-      min_encoder_pos = 0;
-      max_encoder_pos = 1;
-      encoderPos = 0;
-      curr_state = MAIN;      
+      return_to_main(1);     
+      break;
+
+    //if we're in keyboard activity
+    case KEYBOARD:
+      //Serial.println("SWITCH HANDLR FOUND KEYBOARD");
+      //if we're in keyboard screen, return to main menu
+      return_to_main(2);   
       break;
   }
 }
@@ -271,84 +309,72 @@ void playTone(int tone, int duration) {
 
 //display a syllable of the Happy Birthday song at center of OLED display screen
 void displaySyll(char* syll) {
-  disp.setTextSize(4);
+  disp.setTextSize(3);
   
   //center the text
-  disp.getTextBounds(syll, 0, 0, &x, &y, &w, &h);
-
-  //we have 128 width to work with, 64 height to work with
-  int start_x = 64 - int(w / 2);
-  int start_y = 32 - int(h / 2);
+  //disp.getTextBounds(syll, 0, 0, &x, &y, &w, &h);
   
   //display the syll on the screen
   disp.clearDisplay();
-  disp.setCursor(start_x, start_y);
+  
+  //disp.setCursor(64 - int(w / 2), 32 - int(h / 2));
+  disp.setCursor(10, 20);
+  
   disp.println(syll);
   disp.display();
 }
 
-//play the given note for the given duration
-void playNote(char note, char* syll, int duration) {
-  if (syll == NULL) {
-    return;
-  }
-  
-  //name of all possibly notes
-  char names[9] = {'G', 'A', 'B', 'c', 'd', 'e', 'g', 'x', 'y'};
-
-  //corresponding tones for the notes
-  int tones[9] = {1275, 1136, 1014, 956, 834, 765, 468, 655, 715};
-
-  if (strcmp(syll, "")) {
-    displaySyll(syll);
-  }
+void playNote(int note, char* syll, int duration) {
+  displaySyll(syll);
   
   //play the tone corresponding to the note name
-  for (int i = 0; i < 9; i++) {
-    //naive implementation: iterate over all notes, checking if the passed note is this note
-    if (names[i] == note) {
-      //play the tone
-      playTone(tones[i], duration / DUR_CUT);
-    }
-  }
+  playTone(tones[note], duration / 5);
 }
+
 
 //activity for setting the speed
 void set_speed() {
   //by default, always hold rotating at true so that the ISRs will debounce signal 
   rotating = true;
   
-  disp.clearDisplay();
-
-  disp.setTextSize(1);
+  //disp.clearDisplay();
+  //disp.setTextSize(1);
 
   //center the text
-  disp.getTextBounds("Speed (1-10):", 0, 0, &x, &y, &w, &h);
+  //disp.getTextBounds("Speed (1-10):", 0, 0, &x, &y, &w, &h);
 
   //we have 128 width to work with, 64 height to work with
-  int start_x = 64 - int(w / 2);
-  int start_y = 20;
+  //int start_x = 64 - int(60 / 2);
+  //int start_y = 20;
   
   //display the syll on the screen
-  disp.setCursor(start_x, start_y);
-  disp.println("Speed (1-10):");
+  //disp.setCursor(34, 20);
+  //disp.println("Speed (1-10):");
 
   //now display speed setting
-  disp.setTextSize(2);
+  //disp.setTextSize(2);
 
   //while we use encoderPos, disable interrupts
-  String curr_spd_str = String(encoderPos);
-  curr_spd_str.toCharArray(curr_spd, 3);
+  //String curr_spd_str = String(encoderPos);
+  //curr_spd_str.toCharArray(curr_spd, 3);
   
-  disp.getTextBounds(curr_spd, 0, 0, &x, &y, &w, &h);
+  //disp.getTextBounds(curr_spd, 0, 0, &x, &y, &w, &h);
 
-  start_x = 64 - int(w/2);
-  start_y += 10;
+  //start_x = 64 - int(20 / 2);
+  //start_y += 10;
 
-  disp.setCursor(start_x, start_y);
-  disp.println(curr_spd);
+  //int test = encoderPos;
+  //disp.setCursor(54, 30);
+  //disp.println(encoderPos);
   
-  disp.display();
+  //disp.display();
+
+  /*
+  digitalWrite(13, HIGH);
+  delayMicroseconds(encoderPos * 100);
+  digitalWrite(13, LOW);
+  delayMicroseconds(encoderPos * 100);
+  */
 
   if (!digitalRead(switchPin)) {
     handleSwitch();
@@ -369,23 +395,51 @@ void encoder_setup() {
   //encoder pin on interrupt 1 (pin 3)
   attachInterrupt(digitalPinToInterrupt(encoderPinB), doEncoderB, CHANGE);
 
-  //attach switch pin to interrupt -- NOT ENOUGH INTERRUPT PINS
-  //attachInterrupt(digitalPinToInterrupt(switchPin), handleSwitch, CHANGE);
-
   encoderPos = 0;
 }
 
+// Turn off autocalibrate on all channels:
+void cap_setup() {
+  for (int i = 0; i < NUM_KEYS; i++) {
+    keys[i].set_CS_AutocaL_Millis(0xFFFFFFFF);
+  }
+}
 
-void setup() {
+//function for playing keys activity
+void keyboard() {
+  int active = 0;
+
+  //check keys
+  for (int i = 0; i < NUM_KEYS; i++) {
+    //if the capacitance reading is greater than the threshold, play a note:
+    if (keys[i].capacitiveSensor(NUM_OF_SAMPLES) > CAP_THRESHOLD) {
+      //plays the note corresponding to the key pressed
+      tone(buzzerPin, piezo_tones[i]); 
+      active = 1;
+    }
+  }
+
+  //if no key being pressed, make sure buzzer off
+  if (active == 0) {
+    noTone(buzzerPin);
+  }
+
+  //monitor the switch
+  if (!digitalRead(switchPin)) {
+    handleSwitch();
+  }
+}
+
+
+void setup() {  
   //set buzzerPin on the Nano to OUTPUT mode
   pinMode(buzzerPin, OUTPUT);
-
-  //open up serial comms
-  Serial.begin(9600);
 
   //set up display and encoder (register interrupts, etc)
   disp_setup();
   encoder_setup();
+
+  cap_setup();
 }
 
 //main program loop
@@ -397,6 +451,9 @@ void loop() {
       break;
     case SPD:
       set_speed();
+      break;
+   case KEYBOARD:
+      keyboard();
       break;
   }
 }
